@@ -46,7 +46,10 @@ class MusicControls(discord.ui.View):
 # ──────────────────────────────
 @client.event
 async def on_ready():
-    await tree.sync()
+    try:
+        await tree.sync()
+    except:
+        pass
     print(f"✅ Logged in as {client.user}")
 
 # ──────────────────────────────
@@ -55,7 +58,12 @@ async def on_ready():
 ytdl = yt_dlp.YoutubeDL({
     'format': 'bestaudio',
     'noplaylist': True,
-    'quiet': True
+    'quiet': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web']
+        }
+    }
 })
 
 # ──────────────────────────────
