@@ -9,6 +9,7 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 queues = {}
+autoplay = {}
 
 # ──────────────────────────────
 # Music Control Buttons
@@ -62,13 +63,30 @@ def get_queue(guild_id):
 async def play_next(interaction):
     queue = get_queue(interaction.guild.id)
 
+    # If queue empty
     if not queue:
-        await interaction.guild.voice_client.disconnect()
-        return
+        if autoplay.get(interaction.guild.id):
+            last = autoplay.get(interaction.guild.id)
+            if not last:
+                await interaction.channel.send("🛑 Queue ended.")
+                return
+
+            song = await get_related_song(last["title"])
+            queue.append(song)
+        else:
+            await interaction.channel.send("🛑 Queue ended. Add more songs!")
+            return
 
     song = queue.pop(0)
+    autoplay[interaction.guild.id] = song
 
-    source = discord.FFmpegPCMAudio(song["stream"])
+    ffmpeg_options = {
+        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+        "options": "-vn -bufsize 64k"
+    }
+
+    source = discord.FFmpegPCMAudio(song["stream"], **ffmpeg_options)
+
     interaction.guild.voice_client.play(
         source,
         after=lambda e: asyncio.run_coroutine_threadsafe(
@@ -85,6 +103,24 @@ async def play_next(interaction):
     embed.add_field(name="Requested by", value=song["requester"], inline=True)
 
     await interaction.channel.send(embed=embed, view=MusicControls())
+    
+async def preload(song):
+    await asyncio.get_event_loop().run_in_executor(
+        None, lambda: ytdl.extract_info(song["stream"], download=False)
+    )
+    
+async def get_related_song(title):
+    query = f"ytsearch1:{title}"
+    info = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: ytdl.extract_info(query, download=False)['entries'][0]
+    )
+
+    return {
+        "stream": info["url"],
+        "title": info["title"],
+        "thumbnail": info["thumbnail"],
+        "requester": "🎵 Autoplay"
+    }
 
 # ──────────────────────────────
 # Slash Commands
@@ -126,6 +162,9 @@ async def play(interaction: discord.Interaction, query: str):
 
     if not interaction.guild.voice_client.is_playing():
         await play_next(interaction)
+    elif len(queue) == 1:
+        asyncio.create_task(preload(queue[0]))
+
 
 @tree.command(name="queue", description="Show current music queue")
 async def show_queue(interaction: discord.Interaction):
@@ -138,11 +177,40 @@ async def show_queue(interaction: discord.Interaction):
     text = "\n".join(f"{i+1}. {song['title']}" for i, song in enumerate(queue[:10]))
     embed = discord.Embed(title="📃 Music Queue", description=text, color=0x3498DB)
     await interaction.response.send_message(embed=embed)
+    
+@tree.command(name="playlist", description="Show current playlist")
+async def playlist(interaction: discord.Interaction):
+
+    queue = get_queue(interaction.guild.id)
+
+    if not queue:
+        await interaction.response.send_message("🎧 Queue is empty.")
+        return
+
+    text = ""
+    for i, song in enumerate(queue[:15], 1):
+        text += f"**{i}.** {song['title']}\n"
+
+    embed = discord.Embed(title="🎼 Current Playlist", description=text, color=0x5865F2)
+    await interaction.response.send_message(embed=embed)
+    
+@tree.command(name="autoplay", description="Toggle autoplay mode")
+async def toggle_autoplay(interaction: discord.Interaction):
+    state = autoplay.get(interaction.guild.id, False)
+    autoplay[interaction.guild.id] = not state
+    await interaction.response.send_message(f"Autoplay {'ON' if not state else 'OFF'} 🎶")
+
 
 @tree.command(name="skip", description="Skip current song")
 async def skip_cmd(interaction: discord.Interaction):
     interaction.guild.voice_client.stop()
     await interaction.response.send_message("⏭ Skipped.")
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    if member == client.user and before.channel and not after.channel:
+        channel = before.channel
+        await channel.connect()
 
 @tree.command(name="stop", description="Stop music and clear queue")
 async def stop(interaction: discord.Interaction):
